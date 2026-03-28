@@ -44,3 +44,7 @@ webhook_url = "http://localhost:9090/approve"
 [audit]
 enabled = true
 sink = "stdout"
+
+[heartbeat]
+central_url = "http://127.0.0.1:9001"
+interval_secs = 30

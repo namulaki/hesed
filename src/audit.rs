@@ -41,13 +41,17 @@ impl AuditEvent {
 pub struct AuditLogger {
     config: AuditConfig,
     client: reqwest::Client,
+    central_url: Option<String>,
+    api_key: Option<String>,
 }
 
 impl AuditLogger {
-    pub fn new(config: &AuditConfig) -> Self {
+    pub fn new(config: &AuditConfig, central_url: Option<String>, api_key: Option<String>) -> Self {
         Self {
             config: config.clone(),
             client: reqwest::Client::new(),
+            central_url,
+            api_key,
         }
     }
 
@@ -84,6 +88,32 @@ impl AuditLogger {
             }
             other => {
                 tracing::warn!("unknown audit sink: {}", other);
+            }
+        }
+
+        // Forward to central backend if configured
+        if let Some(ref base_url) = self.central_url {
+            let url = format!("{}/api/audit", base_url);
+            let unique_id = format!("{}-{}", event.request_id, event.stage);
+            let payload = serde_json::json!({
+                "id": unique_id,
+                "timestamp": event.timestamp,
+                "stage": event.stage,
+                "action": event.action,
+                "detail": event.detail,
+                "tool": event.tool,
+                "role": event.role,
+            });
+            let mut req = self.client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&payload);
+            if let Some(ref key) = self.api_key {
+                req = req.header("authorization", format!("Bearer {}", key));
+            }
+            if let Err(e) = req.send().await
+            {
+                tracing::warn!("failed to forward audit event to central: {}", e);
             }
         }
     }
@@ -152,7 +182,7 @@ mod tests {
             file_path: None,
             webhook_url: None,
         };
-        let logger = AuditLogger::new(&config);
+        let logger = AuditLogger::new(&config, None, None);
         let event = AuditEvent::new("req-4", "test", "allow", "noop");
         // Should not panic or error
         logger.log(&event).await;
@@ -168,7 +198,7 @@ mod tests {
             file_path: Some(path.clone()),
             webhook_url: None,
         };
-        let logger = AuditLogger::new(&config);
+        let logger = AuditLogger::new(&config, None, None);
         let event = AuditEvent::new("req-5", "test", "allow", "file test");
         logger.log(&event).await;
         let content = std::fs::read_to_string(&path).unwrap();

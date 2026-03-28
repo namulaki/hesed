@@ -5,7 +5,7 @@ A security sidecar proxy for [MCP (Model Context Protocol)](https://modelcontext
 ## Architecture
 
 ```
-User → Agent → [hesed: Interceptor → AuthZ → DLP → Breaker → (HITL?) → Tool] → Agent → User
+User → Agent → [hesed: Interceptor → Breaker → AuthZ → DLP → (HITL?) → Tool] → Agent → User
 ```
 
 Every JSON-RPC `tools/call` request passes through a security pipeline:
@@ -13,9 +13,9 @@ Every JSON-RPC `tools/call` request passes through a security pipeline:
 | Stage | What it does |
 |---|---|
 | Protocol Interceptor | Parses JSON-RPC, routes tool calls into the pipeline |
+| Circuit Breaker | Token-bucket rate limiting via `governor` — cheapest gate, runs first |
 | Policy Engine (AuthZ) | RBAC evaluation - checks if the caller's role is allowed to invoke the tool |
 | Semantic Inspector (DLP) | Regex-based PII detection and redaction on both request and response payloads |
-| Circuit Breaker | Token-bucket rate limiting via `governor` |
 | Human-in-the-Loop | Sends high-risk tool calls to a webhook (e.g. Slack) for approval before execution |
 | Audit Logger | Logs every decision to stdout, file, or webhook (Kafka/Datadog compatible) |
 

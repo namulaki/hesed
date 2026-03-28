@@ -386,6 +386,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "nonzero_ext",
  "regex",
  "reqwest",

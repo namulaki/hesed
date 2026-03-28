@@ -3,6 +3,7 @@ mod authz;
 mod breaker;
 mod config;
 mod dlp;
+mod heartbeat;
 mod hitl;
 mod interceptor;
 mod proxy;
@@ -50,7 +51,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(listen = %addr, upstream = %cfg.upstream.url, "starting mcp-sidecar");
 
-    let state = Arc::new(proxy::SidecarState::new(cfg)?);
+    let state = Arc::new(proxy::SidecarState::new(cfg.clone())?);
+
+    // Start heartbeat if configured
+    if let Some(hb_config) = cfg.heartbeat {
+        heartbeat::spawn(
+            state.clone(),
+            hb_config.central_url,
+            hb_config.interval_secs,
+            cfg.upstream.url.clone(),
+            hb_config.api_key,
+        );
+    }
+
     let listener = TcpListener::bind(addr).await?;
 
     tracing::info!("listening on {}", addr);

@@ -10,6 +10,7 @@ pub struct Config {
     pub breaker: BreakerConfig,
     pub hitl: HitlConfig,
     pub audit: AuditConfig,
+    pub heartbeat: Option<HeartbeatConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -64,6 +65,18 @@ pub struct AuditConfig {
     pub sink: String, // "stdout" | "file" | "webhook"
     pub file_path: Option<String>,
     pub webhook_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HeartbeatConfig {
+    pub central_url: String,
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+    pub api_key: Option<String>,
+}
+
+fn default_interval() -> u64 {
+    30
 }
 
 impl Config {

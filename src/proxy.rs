@@ -1,6 +1,7 @@
 use crate::{audit, authz, breaker, config::Config, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 pub struct SidecarState {
@@ -9,25 +10,35 @@ pub struct SidecarState {
     pub limiter: breaker::Limiter,
     pub audit_logger: audit::AuditLogger,
     pub http_client: reqwest::Client,
+    pub total_requests: AtomicU64,
+    pub blocked_requests: AtomicU64,
 }
 
 impl SidecarState {
     pub fn new(config: Config) -> anyhow::Result<Self> {
         let dlp_engine = dlp::DlpEngine::new(&config.dlp)?;
         let limiter = breaker::new_limiter(config.breaker.requests_per_second, config.breaker.burst_size)?;
-        let audit_logger = audit::AuditLogger::new(&config.audit);
+        let central_url = config.heartbeat.as_ref().map(|hb| hb.central_url.clone());
+        let api_key = config.heartbeat.as_ref().and_then(|hb| hb.api_key.clone());
+        let audit_logger = audit::AuditLogger::new(&config.audit, central_url, api_key);
         let http_client = reqwest::Client::new();
-        Ok(Self { config, dlp_engine, limiter, audit_logger, http_client })
+        Ok(Self {
+            config, dlp_engine, limiter, audit_logger, http_client,
+            total_requests: AtomicU64::new(0),
+            blocked_requests: AtomicU64::new(0),
+        })
     }
 }
 
-/// Main pipeline: Intercept → AuthZ → DLP → Breaker → (HITL?) → Upstream → DLP response → Return
+/// Main pipeline: Intercept → Breaker → AuthZ → DLP → (HITL?) → Upstream → DLP response → Return
 pub async fn handle_request(state: &Arc<SidecarState>, body: &[u8]) -> Vec<u8> {
     let request_id = Uuid::new_v4().to_string();
+    state.total_requests.fetch_add(1, Ordering::Relaxed);
 
     match pipeline(state, body, &request_id).await {
         Ok(response_bytes) => response_bytes,
         Err(err) => {
+            state.blocked_requests.fetch_add(1, Ordering::Relaxed);
             // Try to extract the request id for the JSON-RPC response
             let req_id = interceptor::parse_request(body)
                 .ok()
@@ -60,7 +71,16 @@ async fn pipeline(
         None => return forward_upstream(state, body, request_id).await,
     };
 
-    // 2. AuthZ - extract role and evaluate
+    // 2. Circuit Breaker - rate limit check (cheapest gate, run first)
+    if !breaker::check(&state.limiter) {
+        state.audit_logger.log(
+            &audit::AuditEvent::new(request_id, "breaker", "rate_limit", "request throttled")
+                .with_tool(&tool)
+        ).await;
+        return Err(InterceptError::RateLimited);
+    }
+
+    // 3. AuthZ - extract role and evaluate
     let role = authz::extract_role(req.params.as_ref());
     if !authz::evaluate(&state.config.authz, &role, &tool) {
         state.audit_logger.log(
@@ -76,7 +96,7 @@ async fn pipeline(
             .with_tool(&tool).with_role(&role)
     ).await;
 
-    // 3. DLP - sanitize request params
+    // 4. DLP - sanitize request params
     let mut sanitized_req = req.clone();
     if let Some(ref mut params) = sanitized_req.params {
         let detections = state.dlp_engine.detect(&params.to_string());
@@ -87,15 +107,6 @@ async fn pipeline(
             ).await;
             state.dlp_engine.sanitize_value(params);
         }
-    }
-
-    // 4. Circuit Breaker - rate limit check
-    if !breaker::check(&state.limiter) {
-        state.audit_logger.log(
-            &audit::AuditEvent::new(request_id, "breaker", "rate_limit", "request throttled")
-                .with_tool(&tool)
-        ).await;
-        return Err(InterceptError::RateLimited);
     }
 
     // 5. HITL - human-in-the-loop for high-risk tools

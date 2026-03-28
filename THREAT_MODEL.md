@@ -5,7 +5,7 @@
 hesed is a reverse-proxy sidecar that intercepts JSON-RPC traffic between AI agents and MCP tool servers. Every `tools/call` request passes through a security pipeline:
 
 ```
-Agent → [Interceptor → AuthZ → DLP → Breaker → HITL → Upstream Tool] → Agent
+Agent → [Interceptor → Breaker → AuthZ → DLP → HITL → Upstream Tool] → Agent
 ```
 
 This document enumerates threats against each stage, their impact, and the mitigations hesed provides (or should provide).
