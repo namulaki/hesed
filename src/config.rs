@@ -5,9 +5,12 @@ use std::path::Path;
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
+    #[serde(default)]
     pub authz: AuthzConfig,
+    #[serde(default)]
     pub dlp: DlpConfig,
     pub breaker: BreakerConfig,
+    #[serde(default)]
     pub hitl: HitlConfig,
     pub audit: AuditConfig,
     pub heartbeat: Option<HeartbeatConfig>,
@@ -23,8 +26,9 @@ pub struct UpstreamConfig {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct AuthzConfig {
+    #[serde(default)]
     pub roles: Vec<RoleBinding>,
 }
 
@@ -36,7 +40,9 @@ pub struct RoleBinding {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DlpConfig {
+    #[serde(default)]
     pub patterns: Vec<DlpPattern>,
+    #[serde(default = "default_redact")]
     pub redact_replacement: String,
 }
 
@@ -52,10 +58,13 @@ pub struct BreakerConfig {
     pub burst_size: u32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct HitlConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub high_risk_tools: Vec<String>,
+    #[serde(default)]
     pub webhook_url: String,
 }
 
@@ -77,6 +86,19 @@ pub struct HeartbeatConfig {
 
 fn default_interval() -> u64 {
     30
+}
+
+fn default_redact() -> String {
+    "[REDACTED]".to_string()
+}
+
+impl Default for DlpConfig {
+    fn default() -> Self {
+        Self {
+            patterns: Vec::new(),
+            redact_replacement: default_redact(),
+        }
+    }
 }
 
 impl Config {
