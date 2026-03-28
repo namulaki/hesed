@@ -60,7 +60,7 @@ async fn pipeline(
         None => return forward_upstream(state, body, request_id).await,
     };
 
-    // 2. AuthZ — extract role and evaluate
+    // 2. AuthZ - extract role and evaluate
     let role = authz::extract_role(req.params.as_ref());
     if !authz::evaluate(&state.config.authz, &role, &tool) {
         state.audit_logger.log(
@@ -76,7 +76,7 @@ async fn pipeline(
             .with_tool(&tool).with_role(&role)
     ).await;
 
-    // 3. DLP — sanitize request params
+    // 3. DLP - sanitize request params
     let mut sanitized_req = req.clone();
     if let Some(ref mut params) = sanitized_req.params {
         let detections = state.dlp_engine.detect(&params.to_string());
@@ -89,7 +89,7 @@ async fn pipeline(
         }
     }
 
-    // 4. Circuit Breaker — rate limit check
+    // 4. Circuit Breaker - rate limit check
     if !breaker::check(&state.limiter) {
         state.audit_logger.log(
             &audit::AuditEvent::new(request_id, "breaker", "rate_limit", "request throttled")
@@ -98,7 +98,7 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 5. HITL — human-in-the-loop for high-risk tools
+    // 5. HITL - human-in-the-loop for high-risk tools
     if hitl::requires_approval(&state.config.hitl, &tool) {
         state.audit_logger.log(
             &audit::AuditEvent::new(request_id, "hitl", "pending", &format!("awaiting approval for {}", tool))
@@ -134,7 +134,7 @@ async fn pipeline(
     let upstream_body = serde_json::to_vec(&sanitized_req).unwrap_or_default();
     let mut response_bytes = forward_upstream(state, &upstream_body, request_id).await?;
 
-    // 7. DLP — sanitize response
+    // 7. DLP - sanitize response
     if let Ok(mut resp_value) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
         state.dlp_engine.sanitize_value(&mut resp_value);
         response_bytes = serde_json::to_vec(&resp_value).unwrap_or(response_bytes);

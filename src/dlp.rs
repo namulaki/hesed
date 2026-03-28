@@ -57,3 +57,114 @@ impl DlpEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DlpConfig, DlpPattern};
+    use serde_json::json;
+
+    fn test_config() -> DlpConfig {
+        DlpConfig {
+            redact_replacement: "[REDACTED]".into(),
+            patterns: vec![
+                DlpPattern {
+                    name: "email".into(),
+                    regex: r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}".into(),
+                },
+                DlpPattern {
+                    name: "ssn".into(),
+                    regex: r"\b\d{3}-\d{2}-\d{4}\b".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn new_engine_valid_patterns() {
+        let engine = DlpEngine::new(&test_config());
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn new_engine_invalid_regex() {
+        let config = DlpConfig {
+            redact_replacement: "X".into(),
+            patterns: vec![DlpPattern {
+                name: "bad".into(),
+                regex: "[invalid".into(),
+            }],
+        };
+        assert!(DlpEngine::new(&config).is_err());
+    }
+
+    #[test]
+    fn detect_email() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let matches = engine.detect("contact user@example.com for info");
+        assert!(matches.contains(&"email".to_string()));
+        assert!(!matches.contains(&"ssn".to_string()));
+    }
+
+    #[test]
+    fn detect_ssn() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let matches = engine.detect("SSN is 123-45-6789");
+        assert!(matches.contains(&"ssn".to_string()));
+    }
+
+    #[test]
+    fn detect_nothing() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let matches = engine.detect("nothing sensitive here");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn detect_multiple() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let matches = engine.detect("email: a@b.com ssn: 123-45-6789");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn redact_email() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let result = engine.redact("send to user@example.com please");
+        assert!(result.contains("[REDACTED]"));
+        assert!(!result.contains("user@example.com"));
+    }
+
+    #[test]
+    fn redact_preserves_clean_text() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let input = "nothing to redact here";
+        assert_eq!(engine.redact(input), input);
+    }
+
+    #[test]
+    fn sanitize_value_string() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let mut val = json!("email is user@test.com");
+        engine.sanitize_value(&mut val);
+        assert!(!val.as_str().unwrap().contains("user@test.com"));
+    }
+
+    #[test]
+    fn sanitize_value_nested_object() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let mut val = json!({"data": {"email": "a@b.com"}, "count": 5});
+        engine.sanitize_value(&mut val);
+        assert!(!val["data"]["email"].as_str().unwrap().contains("a@b.com"));
+        assert_eq!(val["count"], 5); // numbers untouched
+    }
+
+    #[test]
+    fn sanitize_value_array() {
+        let engine = DlpEngine::new(&test_config()).unwrap();
+        let mut val = json!(["clean", "has 123-45-6789"]);
+        engine.sanitize_value(&mut val);
+        assert_eq!(val[0], "clean");
+        assert!(val[1].as_str().unwrap().contains("[REDACTED]"));
+    }
+}

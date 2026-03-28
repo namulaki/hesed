@@ -97,3 +97,81 @@ impl AuditLogger {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_event_new() {
+        let event = AuditEvent::new("req-1", "authz", "allow", "role admin allowed");
+        assert_eq!(event.request_id, "req-1");
+        assert_eq!(event.stage, "authz");
+        assert_eq!(event.action, "allow");
+        assert_eq!(event.detail, "role admin allowed");
+        assert!(event.tool.is_none());
+        assert!(event.role.is_none());
+        assert!(!event.timestamp.is_empty());
+    }
+
+    #[test]
+    fn audit_event_with_tool_and_role() {
+        let event = AuditEvent::new("req-2", "dlp", "redact", "email found")
+            .with_tool("jira_search")
+            .with_role("developer");
+        assert_eq!(event.tool, Some("jira_search".into()));
+        assert_eq!(event.role, Some("developer".into()));
+    }
+
+    #[test]
+    fn audit_event_serializes_to_json() {
+        let event = AuditEvent::new("req-3", "breaker", "rate_limit", "exceeded")
+            .with_tool("db_write");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"request_id\":\"req-3\""));
+        assert!(json.contains("\"stage\":\"breaker\""));
+        assert!(json.contains("\"tool\":\"db_write\""));
+    }
+
+    #[test]
+    fn append_to_file_creates_and_writes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        AuditLogger::append_to_file(path, "line1").unwrap();
+        AuditLogger::append_to_file(path, "line2").unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("line1"));
+        assert!(content.contains("line2"));
+    }
+
+    #[tokio::test]
+    async fn logger_disabled_does_nothing() {
+        let config = AuditConfig {
+            enabled: false,
+            sink: "stdout".into(),
+            file_path: None,
+            webhook_url: None,
+        };
+        let logger = AuditLogger::new(&config);
+        let event = AuditEvent::new("req-4", "test", "allow", "noop");
+        // Should not panic or error
+        logger.log(&event).await;
+    }
+
+    #[tokio::test]
+    async fn logger_file_sink() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let config = AuditConfig {
+            enabled: true,
+            sink: "file".into(),
+            file_path: Some(path.clone()),
+            webhook_url: None,
+        };
+        let logger = AuditLogger::new(&config);
+        let event = AuditEvent::new("req-5", "test", "allow", "file test");
+        logger.log(&event).await;
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("req-5"));
+    }
+}

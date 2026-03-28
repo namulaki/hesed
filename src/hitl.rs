@@ -53,3 +53,53 @@ pub async fn request_approval(
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HitlConfig;
+
+    fn enabled_config() -> HitlConfig {
+        HitlConfig {
+            enabled: true,
+            high_risk_tools: vec!["db_write".into(), "db_delete".into(), "github_merge".into()],
+            webhook_url: "http://localhost:9090/approve".into(),
+        }
+    }
+
+    fn disabled_config() -> HitlConfig {
+        HitlConfig {
+            enabled: false,
+            high_risk_tools: vec!["db_write".into()],
+            webhook_url: "http://localhost:9090/approve".into(),
+        }
+    }
+
+    #[test]
+    fn requires_approval_high_risk_tool() {
+        assert!(requires_approval(&enabled_config(), "db_write"));
+        assert!(requires_approval(&enabled_config(), "db_delete"));
+        assert!(requires_approval(&enabled_config(), "github_merge"));
+    }
+
+    #[test]
+    fn no_approval_for_safe_tool() {
+        assert!(!requires_approval(&enabled_config(), "jira_search"));
+        assert!(!requires_approval(&enabled_config(), "github_pr"));
+    }
+
+    #[test]
+    fn no_approval_when_disabled() {
+        assert!(!requires_approval(&disabled_config(), "db_write"));
+    }
+
+    #[test]
+    fn no_approval_empty_tools() {
+        let config = HitlConfig {
+            enabled: true,
+            high_risk_tools: vec![],
+            webhook_url: "http://localhost:9090".into(),
+        };
+        assert!(!requires_approval(&config, "db_write"));
+    }
+}

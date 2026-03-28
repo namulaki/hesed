@@ -1,6 +1,6 @@
 # hesed
 
-A security sidecar proxy for [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) tool calls. It sits between your AI agent and MCP tool servers, enforcing authorization, data loss prevention, rate limiting, and human-in-the-loop approval — with full audit logging.
+A security sidecar proxy for [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) tool calls. It sits between your AI agent and MCP tool servers, enforcing authorization, data loss prevention, rate limiting, and human-in-the-loop approval - with full audit logging.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ Every JSON-RPC `tools/call` request passes through a security pipeline:
 | Stage | What it does |
 |---|---|
 | Protocol Interceptor | Parses JSON-RPC, routes tool calls into the pipeline |
-| Policy Engine (AuthZ) | RBAC evaluation — checks if the caller's role is allowed to invoke the tool |
+| Policy Engine (AuthZ) | RBAC evaluation - checks if the caller's role is allowed to invoke the tool |
 | Semantic Inspector (DLP) | Regex-based PII detection and redaction on both request and response payloads |
 | Circuit Breaker | Token-bucket rate limiting via `governor` |
 | Human-in-the-Loop | Sends high-risk tool calls to a webhook (e.g. Slack) for approval before execution |
@@ -163,4 +163,4 @@ src/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
