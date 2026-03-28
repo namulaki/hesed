@@ -1,0 +1,46 @@
+[server]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+url = "http://127.0.0.1:3000"
+
+[authz]
+[[authz.roles]]
+role = "admin"
+allowed_tools = ["*"]
+
+[[authz.roles]]
+role = "developer"
+allowed_tools = ["jira_search", "github_pr", "db_read"]
+
+[[authz.roles]]
+role = "default"
+allowed_tools = ["jira_search"]
+
+[dlp]
+redact_replacement = "[REDACTED]"
+
+[[dlp.patterns]]
+name = "email"
+regex = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+
+[[dlp.patterns]]
+name = "ssn"
+regex = '\b\d{3}-\d{2}-\d{4}\b'
+
+[[dlp.patterns]]
+name = "credit_card"
+regex = '\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+
+[breaker]
+requests_per_second = 50
+burst_size = 100
+
+[hitl]
+enabled = true
+high_risk_tools = ["db_write", "db_delete", "github_merge"]
+webhook_url = "http://localhost:9090/approve"
+
+[audit]
+enabled = true
+sink = "stdout"
