@@ -133,7 +133,23 @@ async fn pipeline(
         ).await;
 
         let params = sanitized_req.params.as_ref().cloned().unwrap_or(serde_json::Value::Null);
-        match hitl::request_approval(&hitl_cfg, &tool, &role, &params, request_id).await {
+
+        // Prefer central dashboard approval; fall back to webhook
+        let approval_result = if let Some(ref hb) = state.config.heartbeat {
+            if let Some(ref key) = hb.api_key {
+                let agent_id = &state.config.server.listen_addr;
+                hitl::request_approval_central(
+                    &hb.central_url, key, agent_id,
+                    &tool, &role, &params, request_id,
+                ).await
+            } else {
+                hitl::request_approval_webhook(&hitl_cfg, &tool, &role, &params, request_id).await
+            }
+        } else {
+            hitl::request_approval_webhook(&hitl_cfg, &tool, &role, &params, request_id).await
+        };
+
+        match approval_result {
             Ok(true) => {
                 state.audit_logger.log(
                     &audit::AuditEvent::new(request_id, "hitl", "approve", "human approved")
@@ -149,10 +165,10 @@ async fn pipeline(
             }
             Err(e) => {
                 state.audit_logger.log(
-                    &audit::AuditEvent::new(request_id, "hitl", "reject", &format!("webhook error: {}", e))
+                    &audit::AuditEvent::new(request_id, "hitl", "reject", &format!("approval error: {}", e))
                         .with_tool(&tool)
                 ).await;
-                return Err(InterceptError::ApprovalDenied(format!("webhook error: {}", e)));
+                return Err(InterceptError::ApprovalDenied(format!("approval error: {}", e)));
             }
         }
     }

@@ -2,7 +2,7 @@
 listen_addr = "127.0.0.1:8080"
 
 [upstream]
-url = "http://127.0.0.1:3000"
+url = "http://127.0.0.1:9002"
 
 # Rules (authz, dlp, hitl) are pulled from the central dashboard.
 # No static rules here — the dashboard is the single source of truth.
@@ -16,6 +16,6 @@ enabled = true
 sink = "stdout"
 
 [heartbeat]
-central_url = "http://127.0.0.1:9001"
+central_url = "https://hesed.astapa.com"
 interval_secs = 30
-api_key = "hsk_dce71e4d0f0b4610aba0d20d61887c6e"
+api_key = "hsk_73f1afe079124202822a3e41ba3ca293"
