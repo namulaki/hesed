@@ -21,18 +21,28 @@ Every JSON-RPC `tools/call` request passes through a security pipeline:
 
 Non-tool-call methods (e.g. `tools/list`, `resources/read`) are passed through to upstream unmodified.
 
-## Quick Start (Docker Compose)
+## Quick Start
 
-One command to run hesed in front of your MCP server. The MCP server is only reachable through hesed — agents cannot bypass it.
+Two ways to get hesed running. Pick whichever fits your setup.
+
+### Option A: Docker Compose
+
+Run hesed in front of your MCP server with one command. The MCP server is only reachable through hesed — agents cannot bypass it.
+
+**1. Clone the repo:**
 
 ```bash
-# 1. Edit docker-compose.yml — replace the MCP service image with yours
-# 2. Edit config.docker.toml — set your dashboard URL and API key
-# 3. Start everything
-docker compose up --build
+git clone https://github.com/apridosimarmata/hesed
+cd hesed
 ```
 
-**What this does:**
+**2. Edit `docker-compose.yml`** — replace the MCP service image with yours. Edit `config.docker.toml` — set your dashboard URL and API key.
+
+**3. Start everything:**
+
+```bash
+docker compose up --build
+```
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -43,83 +53,41 @@ docker compose up --build
 └─────────────────────────────────────────────┘
 ```
 
-- `mcp` — your MCP tool server, bound to the internal network only (not exposed to the host)
-- `hesed` — the sidecar, listening on port 8080, forwarding to `mcp:3000`
-
-**Point your agent to the sidecar:**
+**4. Point your agent to Hesed:**
 
 ```bash
-# In your agent config, set the MCP server URL to hesed:
 MCP_SERVER_URL=http://localhost:8080
 ```
 
-> The MCP server is intentionally not exposed externally. All traffic must flow through hesed, which enforces your security policies before forwarding to the tool server.
+> The MCP server is intentionally not exposed externally. All traffic must flow through hesed.
 
-### docker-compose.yml
+### Option B: Build from Source
 
-```yaml
-services:
-  mcp:
-    image: your-mcp-server:latest  # Replace with your image
-    networks:
-      - hesed-net
-    expose:
-      - "3000"
-    # Not published to host — only reachable via hesed
+No Docker required. Clone and build with Cargo.
 
-  hesed:
-    build: .
-    volumes:
-      - ./config.docker.toml:/app/config.toml:ro
-    ports:
-      - "8080:8080"
-    networks:
-      - hesed-net
-    depends_on:
-      - mcp
-
-networks:
-  hesed-net:
-    driver: bridge
-```
-
-### config.docker.toml
-
-```toml
-[server]
-listen_addr = "0.0.0.0:8080"
-
-[upstream]
-url = "http://mcp:3000"   # Internal Docker DNS — MCP is not exposed
-
-[breaker]
-requests_per_second = 50
-burst_size = 100
-
-[audit]
-enabled = true
-sink = "stdout"
-
-[heartbeat]
-central_url = "https://your-hesed-dashboard.example.com"
-interval_secs = 30
-api_key = "hsk_your_api_key_here"
-```
-
-## Standalone Quick Start
-
-If you prefer running without Docker:
+**1. Clone and build:**
 
 ```bash
-# Build
-cargo build --release
+git clone https://github.com/apridosimarmata/hesed
+cd hesed && cargo build --release
+```
 
-# Run (defaults to config.toml in current directory)
-./target/release/hesed
+**2. Edit `config.toml`** — set your upstream MCP server address, dashboard URL, and API key.
 
-# Or specify a config path
+**3. Run:**
+
+```bash
+./target/release/hesed              # uses config.toml in current dir
 ./target/release/hesed /path/to/config.toml
 ```
+
+**4. Point your agent to Hesed:**
+
+```bash
+MCP_SERVER_URL=http://localhost:8080
+```
+
+The sidecar will start on `127.0.0.1:8080` by default and proxy requests to your upstream.
 
 ## Config-Pull Architecture
 
@@ -197,15 +165,6 @@ When a tool is listed as high-risk (configured in the dashboard), the sidecar PO
 ```
 
 If the webhook returns `approved: false` or any error, the request is denied with `ApprovalDenied`.
-
-## Docker (standalone)
-
-```bash
-docker build -t hesed .
-docker run -p 8080:8080 -v $(pwd)/config.toml:/app/config.toml hesed
-```
-
-Use `0.0.0.0:8080` as `listen_addr` inside Docker so the port mapping works correctly.
 
 ## Project Structure
 
