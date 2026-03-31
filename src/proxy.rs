@@ -1,9 +1,20 @@
 use crate::{audit, authz, breaker, config::{self, Config}, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Cached resolution of an agent key (hak_) → role.
+#[derive(Debug, Clone)]
+struct CachedRole {
+    role: String,
+    expires_at: std::time::Instant,
+}
+
+/// Default TTL for agent key cache entries (5 minutes).
+const AGENT_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub struct SidecarState {
     pub config: Config,
@@ -16,6 +27,8 @@ pub struct SidecarState {
     pub http_client: reqwest::Client,
     pub total_requests: AtomicU64,
     pub blocked_requests: AtomicU64,
+    /// Local cache: agent_key (hak_) → resolved role + expiry
+    agent_key_cache: RwLock<HashMap<String, CachedRole>>,
 }
 
 impl SidecarState {
@@ -38,7 +51,56 @@ impl SidecarState {
             http_client,
             total_requests: AtomicU64::new(0),
             blocked_requests: AtomicU64::new(0),
+            agent_key_cache: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Resolve an agent key to a role via local cache or backend API call.
+    async fn resolve_agent_key(&self, agent_key: &str) -> Option<String> {
+        // Check cache first
+        {
+            let cache = self.agent_key_cache.read().await;
+            if let Some(cached) = cache.get(agent_key) {
+                if cached.expires_at > std::time::Instant::now() {
+                    return Some(cached.role.clone());
+                }
+            }
+        }
+
+        // Cache miss or expired — call backend
+        let hb = self.config.heartbeat.as_ref()?;
+        let api_key = hb.api_key.as_ref()?;
+        let url = format!("{}/api/resolve-agent-key?key={}", hb.central_url, agent_key);
+
+        let resp = self.http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .ok()?;
+
+        if !resp.status().is_success() {
+            tracing::warn!(agent_key = %agent_key, status = %resp.status(), "agent key resolution failed");
+            return None;
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Resolution {
+            role: String,
+        }
+
+        let res: Resolution = resp.json().await.ok()?;
+
+        // Cache the result
+        {
+            let mut cache = self.agent_key_cache.write().await;
+            cache.insert(agent_key.to_string(), CachedRole {
+                role: res.role.clone(),
+                expires_at: std::time::Instant::now() + AGENT_KEY_CACHE_TTL,
+            });
+        }
+
+        Some(res.role)
     }
 }
 
@@ -91,20 +153,30 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - resolve role (pinned config overrides agent-claimed role)
-    let claimed_role = authz::extract_role(req.params.as_ref());
-    let role = if let Some(ref pinned) = state.config.server.agent_role {
-        if claimed_role != *pinned && claimed_role != "default" {
-            state.audit_logger.log(
-                &audit::AuditEvent::new(
-                    request_id, "authz", "role_override",
-                    &format!("agent claimed '{}', pinned to '{}'", claimed_role, pinned),
-                ).with_tool(&tool).with_role(pinned)
-            ).await;
+    // 3. AuthZ - resolve role: prefer agent key (hak_) over _meta.role
+    let role = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
+        match state.resolve_agent_key(&agent_key).await {
+            Some(resolved_role) => {
+                state.audit_logger.log(
+                    &audit::AuditEvent::new(request_id, "authz", "key_resolve",
+                        &format!("agent_key={} resolved role={}", agent_key, resolved_role))
+                        .with_tool(&tool).with_role(&resolved_role)
+                ).await;
+                resolved_role
+            }
+            None => {
+                state.audit_logger.log(
+                    &audit::AuditEvent::new(request_id, "authz", "deny",
+                        &format!("invalid agent_key={}", agent_key))
+                        .with_tool(&tool)
+                ).await;
+                return Err(InterceptError::AuthzDenied(
+                    format!("invalid agent key '{}'", agent_key),
+                ));
+            }
         }
-        pinned.clone()
     } else {
-        claimed_role
+        authz::extract_role(req.params.as_ref())
     };
     {
         let authz_cfg = state.authz.read().await;

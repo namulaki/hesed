@@ -20,6 +20,16 @@ pub fn extract_role(params: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
+/// Extract the agent key (hak_) from JSON-RPC request metadata (params._meta.agent_key).
+pub fn extract_agent_key(params: Option<&serde_json::Value>) -> Option<String> {
+    params
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("agent_key"))
+        .and_then(|k| k.as_str())
+        .filter(|k| k.starts_with("hak_"))
+        .map(|k| k.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
