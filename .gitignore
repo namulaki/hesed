@@ -3,3 +3,4 @@
 *.pdb
 .env
 audit.log
+config-local.toml

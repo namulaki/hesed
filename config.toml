@@ -20,4 +20,4 @@ sink = "stdout"
 [heartbeat]
 central_url = "https://poimen.astapa.com"
 interval_secs = 30
-api_key = "hsk_1d7ff8e47cb74aa6862f649f06463b2b"
+# api_key = "hsk_..."  # set in config-local.toml (gitignored)
