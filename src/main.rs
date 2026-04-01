@@ -49,19 +49,25 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::load(&config_path)?;
     let addr: SocketAddr = cfg.server.listen_addr.parse()?;
 
-    tracing::info!(listen = %addr, upstream = %cfg.upstream.url, "starting mcp-sidecar");
+    tracing::info!(listen = %addr, upstream = %cfg.upstream.url, mode = ?cfg.mode, "starting mcp-sidecar");
 
     let state = Arc::new(proxy::SidecarState::new(cfg.clone())?);
 
-    // Start heartbeat if configured
-    if let Some(hb_config) = cfg.heartbeat {
-        heartbeat::spawn(
-            state.clone(),
-            hb_config.central_url,
-            hb_config.interval_secs,
-            cfg.upstream.url.clone(),
-            hb_config.api_key,
-        );
+    // Start heartbeat only in dynamic mode
+    if cfg.mode == config::ConfigMode::Dynamic {
+        if let Some(hb_config) = cfg.heartbeat {
+            heartbeat::spawn(
+                state.clone(),
+                hb_config.central_url,
+                hb_config.interval_secs,
+                cfg.upstream.url.clone(),
+                hb_config.api_key,
+            );
+        } else {
+            tracing::warn!("dynamic mode requires [heartbeat] config — falling back to static rules");
+        }
+    } else {
+        tracing::info!("static mode — using rules from config file only");
     }
 
     let listener = TcpListener::bind(addr).await?;

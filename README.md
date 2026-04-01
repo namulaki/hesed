@@ -16,7 +16,7 @@ Every JSON-RPC `tools/call` request passes through a security pipeline:
 | Circuit Breaker | Token-bucket rate limiting via `governor` — cheapest gate, runs first |
 | Policy Engine (AuthZ) | RBAC evaluation — checks if the caller's role is allowed to invoke the tool |
 | Semantic Inspector (DLP) | Regex-based PII detection and redaction on both request and response payloads |
-| Human-in-the-Loop | Sends high-risk tool calls to a webhook for approval before execution |
+| Human-in-the-Loop | Routes high-risk tool calls to webhook (static) or central dashboard (dynamic) for approval |
 | Audit Logger | Logs every decision to stdout, file, or central dashboard |
 
 Non-tool-call methods (e.g. `tools/list`, `resources/read`) are passed through to upstream unmodified.
@@ -88,29 +88,68 @@ MCP_SERVER_URL=http://localhost:8080
 
 The sidecar will start on `127.0.0.1:8080` by default and proxy requests to your upstream.
 
-## Config-Pull Architecture
+## Config Modes
 
-The sidecar pulls all security rules (roles, DLP patterns, HITL rules) from the [poimen-pro](https://github.com/apridosimarmata/poimen-pro) dashboard on every heartbeat tick. The dashboard is the single source of truth — **no static rules in `config.toml`**.
+The sidecar supports two operating modes, controlled by the top-level `mode` field in your config file:
 
-1. Sidecar starts with empty rules
+| Mode | Rules source | HITL approval | Heartbeat | Use case |
+|---|---|---|---|---|
+| `static` (default) | TOML config file | Webhook | Not started | Standalone / air-gapped deployments |
+| `dynamic` | Central dashboard | Central dashboard | Active | Managed fleet with [poimen-pro](https://github.com/apridosimarmata/poimen-pro) |
+
+### Static Mode
+
+All authz roles, DLP patterns, and HITL rules are defined directly in the TOML config. No external dependencies. HITL approvals are sent to the configured `webhook_url`. The heartbeat is never started.
+
+### Dynamic Mode
+
+The sidecar connects to a [poimen-pro](https://github.com/apridosimarmata/poimen-pro) central dashboard and pulls all security rules on every heartbeat tick. The dashboard is the single source of truth — rules in the TOML are used as initial defaults until the first heartbeat syncs.
+
+1. Sidecar starts with rules from TOML (if any)
 2. Every `interval_secs`, POSTs heartbeat to `/api/agents/heartbeat`
 3. Immediately GETs `/api/config` to fetch roles, DLP patterns, HITL rules
 4. Fetched rules replace in-memory config via `RwLock`
-5. Changes in the dashboard take effect on the next heartbeat (default: 30s)
+5. HITL approvals go through the central dashboard (not webhook)
+6. Changes in the dashboard take effect on the next heartbeat (default: 30s)
+
+> If `mode = "dynamic"` but `[heartbeat]` is missing or has no `api_key`, the sidecar logs a warning and falls back to static behavior.
 
 ## Configuration
 
-The sidecar's `config.toml` only needs connectivity settings. Security rules are pulled from the central dashboard.
+### Static config example
 
 ```toml
+mode = "static"   # or just omit — static is the default
+
 [server]
 listen_addr = "127.0.0.1:8080"
 
 [upstream]
-url = "http://127.0.0.1:3000"   # Your MCP tool server
+url = "http://127.0.0.1:3000"
 
-# Rules (authz, dlp, hitl) are pulled from the central dashboard.
-# No static rules here — the dashboard is the single source of truth.
+[authz]
+[[authz.roles]]
+role = "admin"
+allowed_tools = ["*"]
+
+[[authz.roles]]
+role = "developer"
+allowed_tools = ["jira_read", "github_read", "github_write"]
+
+[[authz.roles]]
+role = "default"
+allowed_tools = ["jira_read"]
+
+[dlp]
+redact_replacement = "[REDACTED]"
+[[dlp.patterns]]
+name = "email"
+regex = '[a-z]+@[a-z]+\.[a-z]+'
+
+[hitl]
+enabled = true
+high_risk_tools = ["db_delete", "db_write", "github_merge"]
+webhook_url = "http://localhost:9090/approve"
 
 [breaker]
 requests_per_second = 50
@@ -118,7 +157,30 @@ burst_size = 100
 
 [audit]
 enabled = true
-sink = "stdout"   # "stdout" | "file" | "central"
+sink = "stdout"
+```
+
+### Dynamic config example
+
+```toml
+mode = "dynamic"
+
+[server]
+listen_addr = "127.0.0.1:8080"
+
+[upstream]
+url = "http://127.0.0.1:3000"
+
+# Rules are pulled from the central dashboard.
+# No need to define authz/dlp/hitl here.
+
+[breaker]
+requests_per_second = 50
+burst_size = 100
+
+[audit]
+enabled = true
+sink = "stdout"
 
 [heartbeat]
 central_url = "http://127.0.0.1:9001"
@@ -153,17 +215,24 @@ Example error response:
 
 ## How Roles Work
 
-The sidecar checks the `X-Poimen-Role` header on each request. If no role header is present, it defaults to `"default"`. Roles and their allowed tools are managed in the poimen-pro dashboard.
+The sidecar resolves the caller's role in this order:
+
+1. Agent key (`hak_` prefix in `_meta.agent_key`) — resolved to a role via the central backend (dynamic mode only)
+2. `_meta.role` field in the JSON-RPC params
+3. Falls back to `"default"`
+
+In static mode, roles and allowed tools are defined in `[authz.roles]` in the TOML. In dynamic mode, they're managed in the poimen-pro dashboard and synced via heartbeat.
 
 ## Human-in-the-Loop
 
-When a tool is listed as high-risk (configured in the dashboard), the sidecar POSTs an approval request to the configured webhook URL. The webhook must respond with:
+When a tool is listed as high-risk, the sidecar pauses execution and requests human approval. The approval path depends on the config mode:
 
-```json
-{ "approved": true }
-```
+| Mode | Approval path |
+|---|---|
+| `static` | POST to `webhook_url` configured in `[hitl]` — must respond with `{ "approved": true }` |
+| `dynamic` | POST to central dashboard — approval/denial happens in the poimen-pro UI |
 
-If the webhook returns `approved: false` or any error, the request is denied with `ApprovalDenied`.
+If the approval is denied or errors out, the request is rejected with `ApprovalDenied`.
 
 ## Project Structure
 
@@ -175,10 +244,10 @@ src/
 ├── authz.rs         # RBAC policy engine
 ├── dlp.rs           # PII/payload regex scanner & redactor
 ├── breaker.rs       # Rate limiter (governor)
-├── hitl.rs          # Human-in-the-loop webhook
-├── heartbeat.rs     # Heartbeat + config-pull from central dashboard
+├── hitl.rs          # Human-in-the-loop (webhook + central dashboard)
+├── heartbeat.rs     # Heartbeat + config-pull from central (dynamic mode)
 ├── audit.rs         # Audit event logger
-└── config.rs        # TOML config loader (connectivity only)
+└── config.rs        # TOML config loader + ConfigMode enum
 ```
 
 ## License

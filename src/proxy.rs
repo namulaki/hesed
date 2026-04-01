@@ -1,4 +1,4 @@
-use crate::{audit, authz, breaker, config::{self, Config}, dlp, hitl, interceptor};
+use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-/// Cached resolution of an agent key (hak_) → role.
+/// Cached resolution of an agent key (hak_) → (role, project_id).
 #[derive(Debug, Clone)]
-struct CachedRole {
+struct CachedResolution {
     role: String,
+    project_id: String,
     expires_at: std::time::Instant,
 }
 
@@ -27,8 +28,8 @@ pub struct SidecarState {
     pub http_client: reqwest::Client,
     pub total_requests: AtomicU64,
     pub blocked_requests: AtomicU64,
-    /// Local cache: agent_key (hak_) → resolved role + expiry
-    agent_key_cache: RwLock<HashMap<String, CachedRole>>,
+    /// Local cache: agent_key (hak_) → resolved (role, project_id) + expiry
+    agent_key_cache: RwLock<HashMap<String, CachedResolution>>,
 }
 
 impl SidecarState {
@@ -55,14 +56,15 @@ impl SidecarState {
         })
     }
 
-    /// Resolve an agent key to a role via local cache or backend API call.
-    async fn resolve_agent_key(&self, agent_key: &str) -> Option<String> {
+    /// Resolve an agent key to (role, project_id) via local cache or backend API call.
+    /// The agent key is the single source of truth for both role and project context.
+    async fn resolve_agent_key(&self, agent_key: &str) -> Option<CachedResolution> {
         // Check cache first
         {
             let cache = self.agent_key_cache.read().await;
             if let Some(cached) = cache.get(agent_key) {
                 if cached.expires_at > std::time::Instant::now() {
-                    return Some(cached.role.clone());
+                    return Some(cached.clone());
                 }
             }
         }
@@ -87,20 +89,24 @@ impl SidecarState {
         #[derive(serde::Deserialize)]
         struct Resolution {
             role: String,
+            project_id: String,
         }
 
         let res: Resolution = resp.json().await.ok()?;
 
+        let cached = CachedResolution {
+            role: res.role,
+            project_id: res.project_id,
+            expires_at: std::time::Instant::now() + AGENT_KEY_CACHE_TTL,
+        };
+
         // Cache the result
         {
             let mut cache = self.agent_key_cache.write().await;
-            cache.insert(agent_key.to_string(), CachedRole {
-                role: res.role.clone(),
-                expires_at: std::time::Instant::now() + AGENT_KEY_CACHE_TTL,
-            });
+            cache.insert(agent_key.to_string(), cached.clone());
         }
 
-        Some(res.role)
+        Some(cached)
     }
 }
 
@@ -153,16 +159,16 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - resolve role: prefer agent key (hak_) over _meta.role
-    let role = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
+    // 3. AuthZ - resolve role + project_id from agent key (single source of truth)
+    let (role, resolved_project_id) = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
         match state.resolve_agent_key(&agent_key).await {
-            Some(resolved_role) => {
+            Some(resolution) => {
                 state.audit_logger.log(
                     &audit::AuditEvent::new(request_id, "authz", "key_resolve",
-                        &format!("agent_key={} resolved role={}", agent_key, resolved_role))
-                        .with_tool(&tool).with_role(&resolved_role)
+                        &format!("agent_key={} → role={} project={}", agent_key, resolution.role, resolution.project_id))
+                        .with_tool(&tool).with_role(&resolution.role)
                 ).await;
-                resolved_role
+                (resolution.role, Some(resolution.project_id))
             }
             None => {
                 state.audit_logger.log(
@@ -176,7 +182,7 @@ async fn pipeline(
             }
         }
     } else {
-        authz::extract_role(req.params.as_ref())
+        (authz::extract_role(req.params.as_ref()), None)
     };
     {
         let authz_cfg = state.authz.read().await;
@@ -219,17 +225,19 @@ async fn pipeline(
 
         let params = sanitized_req.params.as_ref().cloned().unwrap_or(serde_json::Value::Null);
 
-        // Prefer central dashboard approval; fall back to webhook
-        let approval_result = if let Some(ref hb) = state.config.heartbeat {
-            if let Some(ref key) = hb.api_key {
-                let agent_id = &state.config.server.listen_addr;
-                hitl::request_approval_central(
-                    &hb.central_url, key, agent_id,
-                    &tool, &role, &params, request_id,
-                ).await
-            } else {
-                hitl::request_approval_webhook(&hitl_cfg, &tool, &role, &params, request_id).await
-            }
+        // Static mode: always use webhook. Dynamic mode: use central dashboard.
+        let central = match state.config.mode {
+            ConfigMode::Dynamic => state.config.heartbeat.as_ref().and_then(|hb| {
+                hb.api_key.as_ref().map(|key| (hb.central_url.as_str(), key.as_str()))
+            }),
+            ConfigMode::Static => None,
+        };
+
+        let approval_result = if let Some((url, key)) = central {
+            let agent_id = &state.config.server.listen_addr;
+            hitl::request_approval_central(
+                url, key, agent_id, &tool, &role, &params, request_id,
+            ).await
         } else {
             hitl::request_approval_webhook(&hitl_cfg, &tool, &role, &params, request_id).await
         };
@@ -259,11 +267,25 @@ async fn pipeline(
     }
     drop(hitl_cfg);
 
-    // 6. Forward to upstream MCP tool server
+    // 6. Inject resolved project_id into _meta so upstream MCP server knows the project
+    if let Some(pid) = resolved_project_id {
+        if let Some(ref mut params) = sanitized_req.params {
+            if let Some(meta) = params.get_mut("_meta") {
+                meta.as_object_mut().map(|m| m.insert("project_id".into(), serde_json::Value::String(pid)));
+            } else {
+                params.as_object_mut().map(|p| p.insert(
+                    "_meta".into(),
+                    serde_json::json!({ "project_id": pid }),
+                ));
+            }
+        }
+    }
+
+    // 7. Forward to upstream MCP tool server
     let upstream_body = serde_json::to_vec(&sanitized_req).unwrap_or_default();
     let mut response_bytes = forward_upstream(state, &upstream_body, request_id).await?;
 
-    // 7. DLP - sanitize response (read from RwLock)
+    // 8. DLP - sanitize response (read from RwLock)
     if let Ok(mut resp_value) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
         let dlp = state.dlp_engine.read().await;
         dlp.sanitize_value(&mut resp_value);

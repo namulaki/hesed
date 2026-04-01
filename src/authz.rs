@@ -1,11 +1,15 @@
 use crate::config::AuthzConfig;
 
 /// Check if a given role is allowed to call the specified tool.
+/// Supports exact match, full wildcard `"*"`, and prefix wildcards like `"poimen_*"`.
 pub fn evaluate(config: &AuthzConfig, role: &str, tool: &str) -> bool {
     config.roles.iter().any(|binding| {
         binding.role == role
-            && (binding.allowed_tools.contains(&"*".to_string())
-                || binding.allowed_tools.iter().any(|t| t == tool))
+            && binding.allowed_tools.iter().any(|t| {
+                t == "*"
+                    || t == tool
+                    || (t.ends_with('*') && tool.starts_with(&t[..t.len() - 1]))
+            })
     })
 }
 
@@ -104,5 +108,19 @@ mod tests {
     fn extract_role_non_string() {
         let params = json!({"_meta": {"role": 42}});
         assert_eq!(extract_role(Some(&params)), "default");
+    }
+
+    #[test]
+    fn prefix_wildcard_allows_matching_tools() {
+        let config = AuthzConfig {
+            roles: vec![RoleBinding {
+                role: "playground".into(),
+                allowed_tools: vec!["poimen_*".into()],
+            }],
+        };
+        assert!(evaluate(&config, "playground", "poimen_list_roles"));
+        assert!(evaluate(&config, "playground", "poimen_create_role"));
+        assert!(!evaluate(&config, "playground", "db_delete"));
+        assert!(!evaluate(&config, "playground", "list_roles"));
     }
 }

@@ -1,10 +1,27 @@
 use serde::Deserialize;
 use std::path::Path;
 
+/// Config mode: "static" uses TOML rules only, "dynamic" syncs from central backend.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigMode {
+    Static,
+    Dynamic,
+}
+
+impl Default for ConfigMode {
+    fn default() -> Self {
+        ConfigMode::Static
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
+    /// "static" = rules from TOML only, "dynamic" = sync from central backend
+    #[serde(default)]
+    pub mode: ConfigMode,
     #[serde(default)]
     pub authz: AuthzConfig,
     #[serde(default)]
@@ -192,6 +209,23 @@ allowed_tools = ["jira", "github"]"#;
         let rb: RoleBinding = toml::from_str(toml_str).unwrap();
         assert_eq!(rb.role, "dev");
         assert_eq!(rb.allowed_tools, vec!["jira", "github"]);
+    }
+
+    #[test]
+    fn default_mode_is_static() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", valid_toml()).unwrap();
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.mode, ConfigMode::Static);
+    }
+
+    #[test]
+    fn dynamic_mode_parsed() {
+        let toml = format!("mode = \"dynamic\"\n{}", valid_toml());
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}", toml).unwrap();
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.mode, ConfigMode::Dynamic);
     }
 
     #[test]
