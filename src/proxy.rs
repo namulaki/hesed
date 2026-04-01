@@ -166,10 +166,9 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - resolve role + project_id + allowed_tools from agent key
-    //    When an agent key is present, its resolved allowed_tools are the source of truth
-    //    (multi-project: each key carries its own project's permissions).
-    //    Without an agent key, fall back to the global config pulled via heartbeat.
+    // 3. AuthZ - resolve role + allowed_tools from agent key (required).
+    //    The agent key's resolved allowed_tools are the source of truth.
+    //    Requests without an agent key are rejected — we never trust agent-supplied roles.
     let role = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
         match state.resolve_agent_key(&agent_key).await {
             Some(resolution) => {
@@ -207,25 +206,15 @@ async fn pipeline(
             }
         }
     } else {
-        // No agent key — use global config (heartbeat-pulled or TOML)
-        let role = authz::extract_role(req.params.as_ref());
-        {
-            let authz_cfg = state.authz.read().await;
-            if !authz::evaluate(&authz_cfg, &role, &tool) {
-                state.audit_logger.log(
-                    &audit::AuditEvent::new(request_id, "authz", "deny", &format!("role={} tool={}", role, tool))
-                        .with_tool(&tool).with_role(&role)
-                ).await;
-                return Err(InterceptError::AuthzDenied(
-                    format!("role '{}' on tool '{}'", role, tool),
-                ));
-            }
-        }
+        // No agent key — reject. Agent keys are required for all tool calls;
+        // we cannot trust an agent-supplied role claim.
         state.audit_logger.log(
-            &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", role, tool))
-                .with_tool(&tool).with_role(&role)
+            &audit::AuditEvent::new(request_id, "authz", "deny", "missing agent key")
+                .with_tool(&tool)
         ).await;
-        role
+        return Err(InterceptError::AuthzDenied(
+            "agent key (hak_) is required".into(),
+        ));
     };
 
     // 4. DLP - sanitize request params (read from RwLock)
