@@ -1,9 +1,10 @@
 use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 /// Cached resolution of an agent key (hak_) → (role, project_id, allowed_tools).
@@ -30,7 +31,8 @@ pub struct SidecarState {
     pub total_requests: AtomicU64,
     pub blocked_requests: AtomicU64,
     /// Local cache: agent_key (hak_) → resolved (role, project_id) + expiry
-    agent_key_cache: RwLock<HashMap<String, CachedResolution>>,
+    agent_key_cache: Mutex<LruCache<String, CachedResolution>>,
+    pub cache_high_water_logged: AtomicBool,
 }
 
 impl SidecarState {
@@ -43,6 +45,7 @@ impl SidecarState {
         let http_client = reqwest::Client::new();
         let authz = config.authz.clone();
         let hitl = config.hitl.clone();
+        let cache_max_entries = config.server.cache_max_entries;
         Ok(Self {
             config,
             authz: RwLock::new(authz),
@@ -53,7 +56,10 @@ impl SidecarState {
             http_client,
             total_requests: AtomicU64::new(0),
             blocked_requests: AtomicU64::new(0),
-            agent_key_cache: RwLock::new(HashMap::new()),
+            agent_key_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(cache_max_entries.max(1)).unwrap(),
+            )),
+            cache_high_water_logged: AtomicBool::new(false),
         })
     }
 
@@ -62,12 +68,14 @@ impl SidecarState {
     async fn resolve_agent_key(&self, agent_key: &str) -> Option<CachedResolution> {
         // Check cache first
         {
-            let cache = self.agent_key_cache.read().await;
+            let mut cache = self.agent_key_cache.lock().await;
             if let Some(cached) = cache.get(agent_key) {
                 if cached.expires_at > std::time::Instant::now() {
                     return Some(cached.clone());
                 }
             }
+            // Entry exists but expired — remove it
+            cache.pop(agent_key);
         }
 
         // Cache miss or expired — call backend
@@ -109,8 +117,19 @@ impl SidecarState {
 
         // Cache the result
         {
-            let mut cache = self.agent_key_cache.write().await;
-            cache.insert(agent_key.to_string(), cached.clone());
+            let mut cache = self.agent_key_cache.lock().await;
+            cache.put(agent_key.to_string(), cached.clone());
+
+            // High-water logging: warn once when cache reaches capacity
+            if cache.len() == cache.cap().get() {
+                if !self.cache_high_water_logged.load(Ordering::Relaxed) {
+                    tracing::warn!("agent key cache reached maximum capacity of {} entries", cache.cap().get());
+                    self.cache_high_water_logged.store(true, Ordering::Relaxed);
+                }
+            } else if self.cache_high_water_logged.load(Ordering::Relaxed) {
+                // Reset so the warning fires again on the next capacity transition
+                self.cache_high_water_logged.store(false, Ordering::Relaxed);
+            }
         }
 
         Some(cached)

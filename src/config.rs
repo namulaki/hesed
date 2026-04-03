@@ -36,6 +36,15 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     pub listen_addr: String,
+    /// Max request body size in bytes. Default: 1 MiB (1048576).
+    #[serde(default = "default_max_request_body_bytes")]
+    pub max_request_body_bytes: u64,
+    /// Graceful shutdown timeout in seconds. Default: 30.
+    #[serde(default = "default_shutdown_timeout_secs")]
+    pub shutdown_timeout_secs: u64,
+    /// Max entries in the agent key cache. Default: 10000.
+    #[serde(default = "default_cache_max_entries")]
+    pub cache_max_entries: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -107,6 +116,18 @@ fn default_interval() -> u64 {
 
 fn default_redact() -> String {
     "[REDACTED]".to_string()
+}
+
+fn default_max_request_body_bytes() -> u64 {
+    1048576
+}
+
+fn default_shutdown_timeout_secs() -> u64 {
+    30
+}
+
+fn default_cache_max_entries() -> usize {
+    10000
 }
 
 impl Default for DlpConfig {
