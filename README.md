@@ -32,7 +32,7 @@ Run poimen in front of your MCP server with one command. The MCP server is only 
 **1. Clone the repo:**
 
 ```bash
-git clone https://github.com/apridosimarmata/poimen
+git clone https://github.com/namulaki/poimen
 cd poimen
 ```
 
@@ -67,7 +67,7 @@ No Docker required. Clone and build with Cargo.
 **1. Clone and build:**
 
 ```bash
-git clone https://github.com/apridosimarmata/poimen
+git clone https://github.com/namulaki/poimen
 cd poimen && cargo build --release
 ```
 
@@ -95,7 +95,7 @@ The sidecar supports two operating modes, controlled by the top-level `mode` fie
 | Mode | Rules source | HITL approval | Heartbeat | Use case |
 |---|---|---|---|---|
 | `static` (default) | TOML config file | Webhook | Not started | Standalone / air-gapped deployments |
-| `dynamic` | Central dashboard | Central dashboard | Active | Managed fleet with [poimen-pro](https://github.com/apridosimarmata/poimen-pro) |
+| `dynamic` | Central dashboard | Central dashboard | Active | Managed fleet with [poimen-pro](https://github.com/namulaki/poimen-pro) |
 
 ### Static Mode
 
@@ -103,7 +103,7 @@ All authz roles, DLP patterns, and HITL rules are defined directly in the TOML c
 
 ### Dynamic Mode
 
-The sidecar connects to a [poimen-pro](https://github.com/apridosimarmata/poimen-pro) central dashboard and pulls all security rules on every heartbeat tick. The dashboard is the single source of truth — rules in the TOML are used as initial defaults until the first heartbeat syncs.
+The sidecar connects to a [poimen-pro](https://github.com/namulaki/poimen-pro) central dashboard and pulls all security rules on every heartbeat tick. The dashboard is the single source of truth — rules in the TOML are used as initial defaults until the first heartbeat syncs.
 
 1. Sidecar starts with rules from TOML (if any)
 2. Every `interval_secs`, POSTs heartbeat to `/api/agents/heartbeat`
