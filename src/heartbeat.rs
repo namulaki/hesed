@@ -1,4 +1,4 @@
-use crate::config::{AuthzConfig, DlpConfig, DlpPattern, HitlConfig, RoleBinding};
+use crate::config::{AuthzConfig, ConfigMode, DlpConfig, DlpPattern, HitlConfig, RoleBinding};
 use crate::dlp::DlpEngine;
 use crate::proxy::SidecarState;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,14 @@ struct HeartbeatPayload {
     upstream_url: Option<String>,
     total_requests: u64,
     blocked_requests: u64,
+    upstream_tools_count: usize,
+    upstream_tools: Vec<UpstreamTool>,
+}
+
+#[derive(Serialize)]
+struct UpstreamTool {
+    name: String,
+    description: Option<String>,
 }
 
 /// Response from GET /api/config on the central server
@@ -78,7 +86,18 @@ pub fn spawn(
         loop {
             tick.tick().await;
 
+            // --- Refresh upstream tool discovery ---
+            crate::discovery::refresh(&state).await;
+
             // --- Send heartbeat ---
+            let tools_guard = state.discovered_tools.read().await;
+            let upstream_tools: Vec<UpstreamTool> = tools_guard.iter().map(|t| UpstreamTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+            }).collect();
+            let upstream_tools_count = upstream_tools.len();
+            drop(tools_guard);
+
             let payload = HeartbeatPayload {
                 agent_id: agent_id.clone(),
                 hostname: hostname.clone(),
@@ -86,6 +105,8 @@ pub fn spawn(
                 upstream_url: Some(upstream_url.clone()),
                 total_requests: state.total_requests.load(Ordering::Relaxed),
                 blocked_requests: state.blocked_requests.load(Ordering::Relaxed),
+                upstream_tools_count,
+                upstream_tools,
             };
 
             let mut req = state.http_client.post(&heartbeat_url).json(&payload);
@@ -104,23 +125,25 @@ pub fn spawn(
                 }
             }
 
-            // --- Pull config from central ---
-            let mut cfg_req = state.http_client.get(&config_url);
-            if let Some(ref key) = api_key {
-                cfg_req = cfg_req.header("authorization", format!("Bearer {}", key));
-            }
-            match cfg_req.send().await {
-                Ok(r) if r.status().is_success() => {
-                    match r.json::<CentralConfig>().await {
-                        Ok(cfg) => apply_config(&state, cfg).await,
-                        Err(e) => tracing::warn!(err = %e, "config parse failed"),
+            // --- Pull config from central (only in dynamic mode) ---
+            if state.config.mode == ConfigMode::Dynamic {
+                let mut cfg_req = state.http_client.get(&config_url);
+                if let Some(ref key) = api_key {
+                    cfg_req = cfg_req.header("authorization", format!("Bearer {}", key));
+                }
+                match cfg_req.send().await {
+                    Ok(r) if r.status().is_success() => {
+                        match r.json::<CentralConfig>().await {
+                            Ok(cfg) => apply_config(&state, cfg).await,
+                            Err(e) => tracing::warn!(err = %e, "config parse failed"),
+                        }
                     }
-                }
-                Ok(r) => {
-                    tracing::warn!(status = %r.status(), "config pull rejected");
-                }
-                Err(e) => {
-                    tracing::warn!(err = %e, "config pull failed");
+                    Ok(r) => {
+                        tracing::warn!(status = %r.status(), "config pull rejected");
+                    }
+                    Err(e) => {
+                        tracing::warn!(err = %e, "config pull failed");
+                    }
                 }
             }
         }
