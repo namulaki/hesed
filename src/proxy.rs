@@ -191,10 +191,22 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - resolve role + allowed_tools from agent key (required).
-    //    The agent key's resolved allowed_tools are the source of truth.
-    //    Requests without an agent key are rejected — we never trust agent-supplied roles.
-    let role = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
+    // 3. AuthZ - resolve role + allowed_tools from agent key.
+    //    In stdio mode the sidecar is the trust boundary (authenticated via hsk_),
+    //    so we skip per-request agent key auth — the IDE can't inject custom metadata.
+    //    In HTTP mode, agent keys are required for every tool call.
+    let agent_key_from_req = authz::extract_agent_key(req.params.as_ref());
+    let is_stdio = state.stdio_child.is_some();
+    let role = if is_stdio && agent_key_from_req.is_none() {
+        // Stdio mode without agent key — allow through with sidecar-level auth.
+        // DLP, HITL, rate limiting, and audit still apply.
+        state.audit_logger.log(
+            &audit::AuditEvent::new(request_id, "authz", "allow",
+                &format!("stdio mode, sidecar-authenticated, tool={}", tool))
+                .with_tool(&tool).with_role("sidecar")
+        ).await;
+        "sidecar".to_string()
+    } else if let Some(agent_key) = agent_key_from_req {
         match state.resolve_agent_key(&agent_key).await {
             Some(resolution) => {
                 state.audit_logger.log(
