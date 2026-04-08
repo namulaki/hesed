@@ -8,6 +8,7 @@ mod heartbeat;
 mod hitl;
 mod interceptor;
 mod proxy;
+mod stdio;
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
@@ -72,11 +73,21 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("config.toml"));
 
     let cfg = config::Config::load(&config_path)?;
-    let addr: SocketAddr = cfg.server.listen_addr.parse()?;
+    let is_stdio = cfg.transport == config::TransportMode::Stdio;
 
-    tracing::info!(listen = %addr, upstream = %cfg.upstream.url, mode = ?cfg.mode, "starting mcp-sidecar");
+    tracing::info!(
+        transport = ?cfg.transport,
+        mode = ?cfg.mode,
+        "starting mcp-sidecar"
+    );
 
-    let state = Arc::new(proxy::SidecarState::new(cfg.clone())?);
+    // Build state — in stdio mode, spawn the child process first
+    let mut state = proxy::SidecarState::new(cfg.clone())?;
+    if is_stdio {
+        let child = stdio::StdioChild::spawn(&cfg.upstream)?;
+        state.stdio_child = Some(Arc::new(child));
+    }
+    let state = Arc::new(state);
 
     // Discover upstream tools on startup (best-effort, non-blocking on failure)
     discovery::refresh(&state).await;
@@ -98,51 +109,58 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("static mode — using rules from config file only");
     }
 
-    let listener = TcpListener::bind(addr).await?;
+    // Branch on transport mode
+    if is_stdio {
+        // Stdio mode: read from our stdin, intercept, forward to child, write to our stdout
+        stdio::run_stdio_loop(state).await?;
+    } else {
+        // HTTP mode: run the HTTP server
+        let addr: SocketAddr = cfg.server.listen_addr.parse()?;
+        let listener = TcpListener::bind(addr).await?;
+        tracing::info!("listening on {}", addr);
 
-    tracing::info!("listening on {}", addr);
+        let mut join_set = tokio::task::JoinSet::new();
+        let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
 
-    let mut join_set = tokio::task::JoinSet::new();
-    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
-
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let (stream, _) = result?;
-                let io = TokioIo::new(stream);
-                let state = state.clone();
-                join_set.spawn(async move {
-                    if let Err(err) = http1::Builder::new()
-                        .serve_connection(io, service_fn(move |req| handle(state.clone(), req)))
-                        .await
-                    {
-                        tracing::error!("connection error: {:?}", err);
-                    }
-                });
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!(in_flight = join_set.len(), "received SIGINT, starting graceful shutdown");
-                break;
-            }
-            _ = sigterm.recv() => {
-                tracing::info!(in_flight = join_set.len(), "received SIGTERM, starting graceful shutdown");
-                break;
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, _) = result?;
+                    let io = TokioIo::new(stream);
+                    let state = state.clone();
+                    join_set.spawn(async move {
+                        if let Err(err) = http1::Builder::new()
+                            .serve_connection(io, service_fn(move |req| handle(state.clone(), req)))
+                            .await
+                        {
+                            tracing::error!("connection error: {:?}", err);
+                        }
+                    });
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!(in_flight = join_set.len(), "received SIGINT, starting graceful shutdown");
+                    break;
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!(in_flight = join_set.len(), "received SIGTERM, starting graceful shutdown");
+                    break;
+                }
             }
         }
-    }
 
-    let timeout_secs = cfg.server.shutdown_timeout_secs;
-    let drain_result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        async {
-            while join_set.join_next().await.is_some() {}
-        },
-    )
-    .await;
+        let timeout_secs = cfg.server.shutdown_timeout_secs;
+        let drain_result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            async {
+                while join_set.join_next().await.is_some() {}
+            },
+        )
+        .await;
 
-    if drain_result.is_err() {
-        tracing::warn!(remaining = join_set.len(), "shutdown timeout reached, aborting remaining connections");
-        join_set.shutdown().await;
+        if drain_result.is_err() {
+            tracing::warn!(remaining = join_set.len(), "shutdown timeout reached, aborting remaining connections");
+            join_set.shutdown().await;
+        }
     }
 
     tracing::info!("shutdown complete");

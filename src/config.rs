@@ -15,6 +15,20 @@ impl Default for ConfigMode {
     }
 }
 
+/// Transport mode: "http" proxies via HTTP POST, "stdio" wraps a child process.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    Http,
+    Stdio,
+}
+
+impl Default for TransportMode {
+    fn default() -> Self {
+        TransportMode::Http
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
@@ -22,6 +36,9 @@ pub struct Config {
     /// "static" = rules from TOML only, "dynamic" = sync from central backend
     #[serde(default)]
     pub mode: ConfigMode,
+    /// "http" = proxy via HTTP POST, "stdio" = wrap child process stdin/stdout
+    #[serde(default)]
+    pub transport: TransportMode,
     #[serde(default)]
     pub authz: AuthzConfig,
     #[serde(default)]
@@ -49,7 +66,17 @@ pub struct ServerConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct UpstreamConfig {
+    /// HTTP upstream URL (required for transport = "http")
+    #[serde(default)]
     pub url: String,
+    /// Command to spawn as child process (required for transport = "stdio")
+    pub command: Option<String>,
+    /// Arguments for the child process command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables passed to the child process
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

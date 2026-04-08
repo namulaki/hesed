@@ -63,8 +63,13 @@ pub async fn discover_tools(
 }
 
 /// Refresh the discovered tools in the sidecar state.
+/// Uses stdio child if available, otherwise falls back to HTTP discovery.
 pub async fn refresh(state: &Arc<crate::proxy::SidecarState>) {
-    let tools = discover_tools(&state.http_client, &state.config.upstream.url).await;
+    let tools = if let Some(ref child) = state.stdio_child {
+        child.discover_tools().await
+    } else {
+        discover_tools(&state.http_client, &state.config.upstream.url).await
+    };
     let mut lock = state.discovered_tools.write().await;
     *lock = tools;
 }

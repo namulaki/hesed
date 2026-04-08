@@ -1,4 +1,4 @@
-use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, discovery, dlp, hitl, interceptor};
+use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, discovery, dlp, hitl, interceptor, stdio};
 use crate::interceptor::InterceptError;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -35,6 +35,8 @@ pub struct SidecarState {
     pub cache_high_water_logged: AtomicBool,
     /// Tools discovered from the upstream MCP server via tools/list
     pub discovered_tools: RwLock<Vec<discovery::ToolInfo>>,
+    /// Child MCP server process for stdio transport (None in HTTP mode)
+    pub stdio_child: Option<Arc<stdio::StdioChild>>,
 }
 
 impl SidecarState {
@@ -63,6 +65,7 @@ impl SidecarState {
             )),
             cache_high_water_logged: AtomicBool::new(false),
             discovered_tools: RwLock::new(Vec::new()),
+            stdio_child: None,
         })
     }
 
@@ -329,6 +332,15 @@ async fn forward_upstream(
     body: &[u8],
     request_id: &str,
 ) -> Result<Vec<u8>, InterceptError> {
+    // Stdio transport: forward via child process stdin/stdout
+    if let Some(ref child) = state.stdio_child {
+        return child.request(body).await.map_err(|e| {
+            tracing::error!(request_id = %request_id, "stdio upstream error: {}", e);
+            InterceptError::Upstream(e.to_string())
+        });
+    }
+
+    // HTTP transport: forward via HTTP POST
     let resp = state.http_client
         .post(&state.config.upstream.url)
         .header("content-type", "application/json")
